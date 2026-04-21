@@ -24,10 +24,18 @@ Cascatas aumentam o multiplicador em +1x a cada nível.
 
 ## Como rodar
 
+Recomendado usar um ambiente virtual (especialmente no macOS com Homebrew Python, que bloqueia `pip install` no sistema):
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python main.py
 ```
+
+Nas próximas execuções basta ativar o venv e rodar `python main.py`.
+
+> O projeto usa `pygame-ce` (drop-in para `pygame`) para compatibilidade com Python 3.14. Se você já tinha `pygame` instalado no venv, rode `pip uninstall -y pygame && pip install -r requirements.txt`.
 
 ## Controles
 
