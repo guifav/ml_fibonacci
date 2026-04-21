@@ -1,0 +1,6 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    # Procedural painting uses RNG - avoid noise about const constructors.
+    prefer_const_constructors: ignore

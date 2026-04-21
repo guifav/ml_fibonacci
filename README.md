@@ -2,6 +2,10 @@
 
 Um jogo no estilo Candy Crush em que as peças são **conchas espirais** desenhadas proceduralmente e as explosões seguem a **sequência de Fibonacci** (3, 5, 8, 13, 21...).
 
+> Duas versões neste repositório:
+> - **`main.py`** — MVP em Python/Pygame (desktop). O mais rápido de rodar para prototipar.
+> - **`flutter_app/`** — port em Flutter + flame para Android (alvo Play Store). Mesma mecânica com partículas, screen shake, long-press para detonar e top 10 persistido no dispositivo. Veja [`flutter_app/README.md`](flutter_app/README.md) para setup.
+
 ## Regras
 
 - Tabuleiro 8×8 com 6 cores de conchas.
