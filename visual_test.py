@@ -1,4 +1,4 @@
-"""Render a few game states headlessly and save screenshots to /tmp/shots."""
+"""Render several states showcasing the charged-glow mechanic."""
 import os
 import pathlib
 
@@ -36,40 +36,34 @@ def save(name: str) -> None:
     print(f"saved {path}")
 
 
-# 1) Initial random board
+# Build a board with two charged groups of sizes 3 and 5
 game = main.Game(seed=7)
-render(game)
-save("01_initial.png")
-
-# 2) Board with a selection highlight
-game.selected = (3, 3)
-render(game)
-save("02_selected.png")
-game.selected = None
-
-# 3) Plant an isolated group of 5 and trigger the explosion mid-animation
 for r in range(main.GRID_ROWS):
     for c in range(main.GRID_COLS):
         game.board[r][c] = main.Piece(2 if (r + c) % 2 == 0 else 3)
+for c in range(3):
+    game.board[1][c] = main.Piece(0)
 for c in range(5):
-    game.board[4][c] = main.Piece(0)
+    game.board[4][c] = main.Piece(1)
+main.recompute_charges(game.board)
 
-groups = main.find_groups(game.board)
-game.trigger_explosions(groups)
+render(game)
+save("10_charged.png")
 
-# Step through explosion animation
-for i in range(6):
+# Detonate the 5-group
+game.on_click(4, 2, button=3)
+for i in range(5):
     game.update(1 / 60)
-    render(game)
-    save(f"03_explode_{i:02d}.png")
+render(game)
+save("11_detonating.png")
 
-# Finish animation including fall + cascade
+# Finish animation
 for _ in range(600):
     game.update(1 / 60)
     if game.state == "idle":
         break
 render(game)
-save("04_after_cascade.png")
-print(f"final score: {game.score}")
+save("12_post_cascade.png")
+print(f"final score: {game.score}, combo_level: {game.combo_level}")
 
 pygame.quit()

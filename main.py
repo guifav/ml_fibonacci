@@ -129,6 +129,7 @@ class Piece:
     # visual scale for explosion pop
     scale: float = 1.0
     fading: float = 0.0  # 0..1, 1 means fully exploded/invisible
+    charged: bool = False  # part of a match-group waiting for manual detonation
 
 
 def new_board(rng: random.Random) -> list[list[Piece]]:
@@ -191,6 +192,39 @@ def has_line_of_three(cells: Iterable[tuple[int, int]]) -> bool:
     return False
 
 
+def recompute_charges(board: list[list[Piece]]) -> None:
+    """Mark every piece belonging to a match-group (>=3, line-of-3) as charged."""
+    groups = find_groups(board)
+    charged_cells: set[tuple[int, int]] = set()
+    for g in groups:
+        for cell in g:
+            charged_cells.add(cell)
+    for r in range(GRID_ROWS):
+        for c in range(GRID_COLS):
+            board[r][c].charged = (r, c) in charged_cells
+
+
+def charged_component(board: list[list[Piece]], r: int, c: int) -> list[tuple[int, int]]:
+    """Flood-fill the charged same-color cluster containing (r, c).
+
+    Returns an empty list if the cell is not charged.
+    """
+    if not in_bounds(r, c) or not board[r][c].charged:
+        return []
+    color = board[r][c].color
+    stack = [(r, c)]
+    seen: set[tuple[int, int]] = set()
+    while stack:
+        rr, cc = stack.pop()
+        if (rr, cc) in seen or not in_bounds(rr, cc):
+            continue
+        if not board[rr][cc].charged or board[rr][cc].color != color:
+            continue
+        seen.add((rr, cc))
+        stack.extend([(rr + 1, cc), (rr - 1, cc), (rr, cc + 1), (rr, cc - 1)])
+    return list(seen)
+
+
 # ---------- Game logic ----------
 class Game:
     def __init__(self, seed: int | None = None) -> None:
@@ -211,11 +245,20 @@ class Game:
         self.pending_swap_after: tuple[tuple[int, int], tuple[int, int]] | None = None
 
     # ---- Interaction ----
-    def on_click(self, r: int, c: int) -> None:
+    def on_click(self, r: int, c: int, button: int = 1) -> None:
+        """button: 1 = left (select/swap), 3 = right (detonate charged cluster)."""
         if self.state != "idle":
             return
         if not in_bounds(r, c):
             return
+
+        if button == 3:
+            if self.board[r][c].charged:
+                self.detonate_at(r, c)
+                self.selected = None
+            return
+
+        # Left click: selection / swap
         if self.selected is None:
             self.selected = (r, c)
             return
@@ -227,7 +270,6 @@ class Game:
             self.begin_swap((sr, sc), (r, c))
             self.selected = None
         else:
-            # select the new cell
             self.selected = (r, c)
 
     def begin_swap(self, a: tuple[int, int], b: tuple[int, int], reverting: bool = False) -> None:
@@ -250,13 +292,14 @@ class Game:
                 self.swap_anim = None
                 if reverting:
                     self.state = "idle"
-                    self.combo_level = 0
                 else:
-                    # Check matches; if none, revert
+                    # Accept swap only if it produces/grows a match group
                     groups = find_groups(self.board)
-                    if groups:
-                        self.combo_level = 0
-                        self.trigger_explosions(groups)
+                    involved = {a, b}
+                    if any(involved.intersection(g) for g in groups):
+                        self.combo_level = 0  # swap resets combo multiplier
+                        recompute_charges(self.board)
+                        self.state = "idle"
                     else:
                         self.begin_swap(a, b, reverting=True)
         elif self.state == "explode":
@@ -275,43 +318,34 @@ class Game:
         elif self.state == "fall":
             self.advance_fall(dt)
         elif self.state == "settle":
-            # brief pause then re-check matches (cascade)
+            # brief pause after fall, then re-charge any matches formed by cascade
+            # (but do NOT auto-detonate — player decides)
             self.explode_t += dt
             if self.explode_t > 0.08:
-                groups = find_groups(self.board)
-                if groups:
-                    self.combo_level += 1
-                    self.trigger_explosions(groups)
-                else:
-                    self.state = "idle"
-                    self.combo_level = 0
+                recompute_charges(self.board)
+                self.state = "idle"
 
-    def trigger_explosions(self, groups: list[list[tuple[int, int]]]) -> None:
-        gained = 0
-        best_label = ""
-        best_tier = 0
-        for group in groups:
-            size = len(group)
-            tier = fib_tier(size)
-            if tier == 0:
-                continue
-            base = FIB_POINTS[tier]
-            # Bonus when size is *exactly* Fibonacci
-            exact_mult = 2 if is_fib(size) else 1
-            cascade_mult = 1 + self.combo_level  # 1x, 2x, 3x ...
-            pts = base * exact_mult * cascade_mult
-            gained += pts
-            if tier > best_tier:
-                best_tier = tier
-                suffix = " EXATO!" if is_fib(size) else ""
-                best_label = f"{FIB_LABELS[tier]} (x{size}){suffix}"
+    def detonate_at(self, r: int, c: int) -> None:
+        cells = charged_component(self.board, r, c)
+        if not cells:
+            return
+        size = len(cells)
+        tier = fib_tier(size)
+        if tier == 0:
+            return
+        base = FIB_POINTS[tier]
+        exact_mult = 2 if is_fib(size) else 1
+        combo_mult = 1 + self.combo_level  # 1x, 2x, 3x ... within a planning phase
+        gained = base * exact_mult * combo_mult
         self.score += gained
-        if gained > 0:
-            cascade_text = f"  cascata x{self.combo_level + 1}" if self.combo_level > 0 else ""
-            self.last_match_text = f"+{gained}  {best_label}{cascade_text}"
-            self.last_match_until = 1.6
+        self.combo_level += 1
 
-        self.exploding = [cell for g in groups for cell in g]
+        suffix = " EXATO!" if is_fib(size) else ""
+        combo_text = f"  combo x{combo_mult}" if combo_mult > 1 else ""
+        self.last_match_text = f"+{gained}  {FIB_LABELS[tier]} (x{size}){suffix}{combo_text}"
+        self.last_match_until = 1.6
+
+        self.exploding = cells
         self.explode_t = 0.0
         self.state = "explode"
 
@@ -416,6 +450,22 @@ def draw_board(screen: pygame.Surface, game: Game, board_x: int, board_y: int) -
         pygame.draw.line(grid_surf, GRID_LINE, (0, i * CELL), (BOARD_W, i * CELL))
     screen.blit(grid_surf, (board_x, board_y))
 
+    # Charged glow (drawn under the shells so the shell sits on top)
+    pulse_alpha = 110 + int(70 * math.sin(pygame.time.get_ticks() / 180))
+    glow_surf = pygame.Surface((CELL, CELL), pygame.SRCALPHA)
+    pygame.draw.circle(glow_surf, (255, 215, 80, pulse_alpha), (CELL // 2, CELL // 2), int(CELL * 0.44))
+    pygame.draw.circle(glow_surf, (255, 235, 160, min(255, pulse_alpha + 40)), (CELL // 2, CELL // 2), int(CELL * 0.44), width=2)
+    for r in range(GRID_ROWS):
+        for c in range(GRID_COLS):
+            p = game.board[r][c]
+            if not p.charged or p.color < 0 or p.fading > 0:
+                continue
+            dx, dy = game.board_piece_pos(r, c)
+            cx = board_x + c * CELL + CELL / 2 + dx
+            cy = board_y + r * CELL + CELL / 2 + dy
+            rect = glow_surf.get_rect(center=(cx, cy))
+            screen.blit(glow_surf, rect)
+
     # Draw pieces
     for r in range(GRID_ROWS):
         for c in range(GRID_COLS):
@@ -477,6 +527,13 @@ def draw_sidebar(screen: pygame.Surface, game: Game, x: int, y: int, font: pygam
         txt.set_alpha(alpha)
         screen.blit(txt, (x + pad, y + pad + 110))
 
+    # Current combo multiplier for the next detonation
+    if game.combo_level > 0:
+        combo_txt = small.render(
+            f"próx. detonação: x{game.combo_level + 1}", True, HIGHLIGHT,
+        )
+        screen.blit(combo_txt, (x + pad, y + pad + 136))
+
     # Tier table
     header_y = y + pad + 160
     header = small.render("TIERS FIBONACCI", True, TEXT_DIM)
@@ -491,12 +548,15 @@ def draw_sidebar(screen: pygame.Surface, game: Game, x: int, y: int, font: pygam
 
     tip_y = row_y + 16
     tips = [
-        "- Troque peças adjacentes",
-        "- Grupo = Fibonacci exato",
-        "  dobra a pontuação",
-        "- Cascatas multiplicam",
+        "- Esq: selecionar/trocar",
+        "- Dir: detonar grupo",
+        "  carregado (dourado)",
+        "- Cresca p/ Fibonacci",
+        "  (3-5-8-13...) = 2x",
+        "- Detonar em seq. sem",
+        "  trocar = combo +1x",
         "",
-        "[R] reiniciar  [ESC] sair",
+        "[R] reiniciar [ESC] sair",
     ]
     for line in tips:
         screen.blit(small.render(line, True, TEXT_DIM), (x + pad, tip_y))
@@ -533,12 +593,12 @@ def main() -> None:
                     running = False
                 elif event.key == pygame.K_r:
                     game = Game()
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button in (1, 3):
                 mx, my = event.pos
                 if board_x <= mx < board_x + BOARD_W and board_y <= my < board_y + BOARD_H:
                     c = (mx - board_x) // CELL
                     r = (my - board_y) // CELL
-                    game.on_click(int(r), int(c))
+                    game.on_click(int(r), int(c), event.button)
 
         game.update(dt)
         if game.last_match_until > 0:
