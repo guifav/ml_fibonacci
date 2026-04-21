@@ -1,0 +1,23 @@
+name: fibonacci_shells
+description: "Match-3 com sequência de Fibonacci — conchas espirais e detonação manual."
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flame: ^1.22.0
+  shared_preferences: ^2.2.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  # assets are fully procedural — no image assets shipped

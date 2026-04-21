@@ -1,0 +1,30 @@
+# Flutter / Dart
+.dart_tool/
+.pub-cache/
+.pub/
+build/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Generated platform config per-developer (not portable)
+android/local.properties
+android/.gradle/
+android/gradle/wrapper/gradle-wrapper.jar
+android/**/GeneratedPluginRegistrant.*
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Signing (NEVER commit)
+**/key.properties
+**/keystore.jks
+**/*.keystore
+**/*.jks
+**/upload-keystore.*
