@@ -11,6 +11,8 @@ Um jogo no estilo Candy Crush em que as peças são **conchas espirais** desenha
 - Tamanhos exatamente Fibonacci ganham **bônus 2x**. Tamanhos intermediários (4, 6, 7, 9…) caem ao tier Fibonacci inferior.
 - **Combo multiplier**: cada detonação sem uma nova troca entre elas adiciona **+1x** ao multiplicador. Trocar reseta o combo.
 - Depois da detonação, peças caem e são substituídas do topo. Matches formados pela cascata também ficam carregados (você escolhe quando detonar).
+- **Temporizador**: cada partida dura **90 segundos**. Quando o tempo acaba, a pontuação é salva no ranking local.
+- **Ranking local**: top 10 pontuações persistem em `scores.json` (ao lado do `main.py`). Top 3 aparecem na sidebar; top 10 completo na tela de fim de jogo, com destaque na sua posição.
 
 ## Pontuação
 
