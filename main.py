@@ -4,10 +4,13 @@ Run with: python main.py
 """
 from __future__ import annotations
 
+import datetime
+import json
 import math
 import random
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 
 import pygame
@@ -46,6 +49,12 @@ TEXT_COLOR = (235, 235, 245)
 TEXT_DIM = (160, 170, 200)
 HIGHLIGHT = (255, 230, 120)
 
+# Game timer (seconds) for a round
+GAME_DURATION = 90.0
+# Persistent leaderboard
+SCORES_PATH = Path(__file__).resolve().parent / "scores.json"
+MAX_SCORES = 10
+
 # Fibonacci sequence values used as "match tiers". We want F_4=3 onwards.
 FIB_SIZES = [3, 5, 8, 13, 21, 34, 55]
 # Base points per Fibonacci tier (grows faster than linear so bigger combos feel big)
@@ -66,6 +75,48 @@ def fib_tier(size: int) -> int:
 
 def is_fib(size: int) -> bool:
     return size in FIB_SIZES
+
+
+# ---------- Score persistence ----------
+def load_scores() -> list[dict]:
+    try:
+        with open(SCORES_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return []
+
+
+def save_scores(scores: list[dict]) -> None:
+    try:
+        with open(SCORES_PATH, "w", encoding="utf-8") as f:
+            json.dump(scores, f, indent=2, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def record_score(score: int, best_tier: int) -> tuple[list[dict], int]:
+    """Append a new score, sort, trim to MAX_SCORES, persist.
+
+    Returns (sorted scores, rank of new entry or -1 if outside the leaderboard).
+    """
+    scores = load_scores()
+    new_entry = {
+        "score": score,
+        "best_tier": best_tier,
+        "date": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    scores.append(new_entry)
+    scores.sort(key=lambda s: (s.get("score", 0), s.get("best_tier", 0)), reverse=True)
+    scores = scores[:MAX_SCORES]
+    save_scores(scores)
+    try:
+        rank = scores.index(new_entry)
+    except ValueError:
+        rank = -1
+    return scores, rank
 
 
 # ---------- Shell rendering (procedural) ----------
@@ -234,6 +285,7 @@ class Game:
         self.last_match_text = ""
         self.last_match_until = 0.0
         self.combo_level = 0
+        self.best_tier_this_game = 0
         self.selected: tuple[int, int] | None = None
         self.swap_anim: tuple[tuple[int, int], tuple[int, int], float, bool] | None = None
         # swap_anim = ((r1,c1),(r2,c2), progress 0..1, reverting?)
@@ -241,8 +293,12 @@ class Game:
         self.explode_t = 0.0
         self.falling = False
         self.fall_speed = 600.0  # pixels per second
-        self.state = "idle"  # idle | swap | explode | fall | settle
+        self.state = "idle"  # idle | swap | explode | fall | settle | gameover
         self.pending_swap_after: tuple[tuple[int, int], tuple[int, int]] | None = None
+        # Timer & leaderboard
+        self.time_left = GAME_DURATION
+        self.leaderboard: list[dict] = load_scores()
+        self.last_rank: int = -1  # rank in leaderboard after game over (-1 = not placed)
 
     # ---- Interaction ----
     def on_click(self, r: int, c: int, button: int = 1) -> None:
@@ -282,6 +338,13 @@ class Game:
 
     # ---- Update / animation ----
     def update(self, dt: float) -> None:
+        # Countdown timer runs until game over (even during animations so players
+        # can't stall by triggering long effects).
+        if self.state != "gameover":
+            self.time_left = max(0.0, self.time_left - dt)
+            if self.time_left <= 0.0:
+                self.enter_game_over()
+                return
         if self.state == "swap":
             assert self.swap_anim is not None
             a, b, t, reverting = self.swap_anim
@@ -339,6 +402,8 @@ class Game:
         gained = base * exact_mult * combo_mult
         self.score += gained
         self.combo_level += 1
+        if tier > self.best_tier_this_game:
+            self.best_tier_this_game = tier
 
         suffix = " EXATO!" if is_fib(size) else ""
         combo_text = f"  combo x{combo_mult}" if combo_mult > 1 else ""
@@ -348,6 +413,15 @@ class Game:
         self.exploding = cells
         self.explode_t = 0.0
         self.state = "explode"
+
+    def enter_game_over(self) -> None:
+        if self.state == "gameover":
+            return
+        self.state = "gameover"
+        self.selected = None
+        self.leaderboard, self.last_rank = record_score(
+            self.score, self.best_tier_this_game,
+        )
 
     def start_fall(self) -> None:
         # For each column: pieces with color >= 0 fall down into empty slots,
@@ -506,61 +580,151 @@ def draw_board(screen: pygame.Surface, game: Game, board_x: int, board_y: int) -
         )
 
 
+def format_time(seconds: float) -> str:
+    seconds = max(0, int(math.ceil(seconds)))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
 def draw_sidebar(screen: pygame.Surface, game: Game, x: int, y: int, font: pygame.font.Font, small: pygame.font.Font, big: pygame.font.Font) -> None:
     panel = pygame.Rect(x, y, SIDEBAR_W, BOARD_H)
     pygame.draw.rect(screen, PANEL_BG, panel, border_radius=12)
     pygame.draw.rect(screen, PANEL_BORDER, panel, width=2, border_radius=12)
 
     pad = 16
+    cursor = y + pad
+
     title = big.render("Fibonacci Shells", True, TEXT_COLOR)
-    screen.blit(title, (x + pad, y + pad))
+    screen.blit(title, (x + pad, cursor))
+    cursor += 40
 
+    # Timer (red-ish if urgent)
+    timer_label = small.render("TEMPO", True, TEXT_DIM)
+    screen.blit(timer_label, (x + pad, cursor))
+    cursor += 18
+    timer_color = HIGHLIGHT
+    if game.time_left < 15:
+        timer_color = (255, 120, 100)
+    timer_txt = big.render(format_time(game.time_left), True, timer_color)
+    screen.blit(timer_txt, (x + pad, cursor))
+    cursor += 34
+
+    # Score
     score_label = small.render("PONTUACAO", True, TEXT_DIM)
-    screen.blit(score_label, (x + pad, y + pad + 46))
+    screen.blit(score_label, (x + pad, cursor))
+    cursor += 18
     score_txt = big.render(f"{game.score}", True, HIGHLIGHT)
-    screen.blit(score_txt, (x + pad, y + pad + 64))
+    screen.blit(score_txt, (x + pad, cursor))
+    cursor += 34
 
-    # Last match flash
+    # Last match flash & combo indicator (fixed height reserved even if inactive)
+    flash_y = cursor
     if game.last_match_until > 0 and game.last_match_text:
         alpha = min(255, int(255 * min(1.0, game.last_match_until / 0.4)))
         txt = font.render(game.last_match_text, True, HIGHLIGHT)
         txt.set_alpha(alpha)
-        screen.blit(txt, (x + pad, y + pad + 110))
-
-    # Current combo multiplier for the next detonation
-    if game.combo_level > 0:
+        screen.blit(txt, (x + pad, flash_y))
+    cursor += 22
+    if game.combo_level > 0 and game.state != "gameover":
         combo_txt = small.render(
             f"próx. detonação: x{game.combo_level + 1}", True, HIGHLIGHT,
         )
-        screen.blit(combo_txt, (x + pad, y + pad + 136))
+        screen.blit(combo_txt, (x + pad, cursor))
+    cursor += 22
 
-    # Tier table
-    header_y = y + pad + 160
-    header = small.render("TIERS FIBONACCI", True, TEXT_DIM)
-    screen.blit(header, (x + pad, header_y))
-    row_y = header_y + 24
+    # Tier table (compact)
+    header = small.render("FIBONACCI", True, TEXT_DIM)
+    screen.blit(header, (x + pad, cursor))
+    cursor += 20
     for size in FIB_SIZES[:5]:
         label = FIB_LABELS[size]
         line = f"{label}  x{size:<3}  {FIB_POINTS[size]} pts"
-        txt = small.render(line, True, TEXT_COLOR)
-        screen.blit(txt, (x + pad, row_y))
-        row_y += 20
+        screen.blit(small.render(line, True, TEXT_COLOR), (x + pad, cursor))
+        cursor += 18
 
-    tip_y = row_y + 16
-    tips = [
-        "- Esq: selecionar/trocar",
-        "- Dir: detonar grupo",
-        "  carregado (dourado)",
-        "- Cresca p/ Fibonacci",
-        "  (3-5-8-13...) = 2x",
-        "- Detonar em seq. sem",
-        "  trocar = combo +1x",
-        "",
-        "[R] reiniciar [ESC] sair",
-    ]
-    for line in tips:
-        screen.blit(small.render(line, True, TEXT_DIM), (x + pad, tip_y))
-        tip_y += 18
+    # Top 3 scores
+    cursor += 8
+    screen.blit(small.render("MELHORES", True, TEXT_DIM), (x + pad, cursor))
+    cursor += 20
+    if not game.leaderboard:
+        screen.blit(small.render("— nenhum ainda —", True, TEXT_DIM), (x + pad, cursor))
+        cursor += 18
+    else:
+        for idx, entry in enumerate(game.leaderboard[:3]):
+            tier = entry.get("best_tier", 0)
+            tier_txt = FIB_LABELS.get(tier, "-") if tier else "-"
+            line = f"{idx + 1}. {entry.get('score', 0):>5}  {tier_txt}"
+            screen.blit(small.render(line, True, TEXT_COLOR), (x + pad, cursor))
+            cursor += 18
+
+    # Footer
+    footer_y = y + BOARD_H - pad - 18
+    screen.blit(small.render("[R] reiniciar  [ESC] sair", True, TEXT_DIM), (x + pad, footer_y))
+
+
+def draw_game_over(screen: pygame.Surface, game: Game, board_x: int, board_y: int,
+                   font: pygame.font.Font, small: pygame.font.Font, big: pygame.font.Font) -> None:
+    # Dim overlay over the board area
+    overlay = pygame.Surface((BOARD_W, BOARD_H), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 170))
+    screen.blit(overlay, (board_x, board_y))
+
+    # Central panel
+    panel_w = BOARD_W - 40
+    panel_h = BOARD_H - 80
+    panel_x = board_x + (BOARD_W - panel_w) // 2
+    panel_y = board_y + (BOARD_H - panel_h) // 2
+    panel_rect = pygame.Rect(panel_x, panel_y, panel_w, panel_h)
+    pygame.draw.rect(screen, PANEL_BG, panel_rect, border_radius=14)
+    pygame.draw.rect(screen, PANEL_BORDER, panel_rect, width=2, border_radius=14)
+
+    cursor = panel_y + 18
+    title = big.render("FIM DE JOGO", True, TEXT_COLOR)
+    screen.blit(title, title.get_rect(midtop=(panel_x + panel_w // 2, cursor)))
+    cursor += 40
+
+    # Final score (big)
+    score_line = big.render(f"{game.score}", True, HIGHLIGHT)
+    screen.blit(score_line, score_line.get_rect(midtop=(panel_x + panel_w // 2, cursor)))
+    cursor += 34
+
+    best_txt = (
+        f"maior grupo: {FIB_LABELS[game.best_tier_this_game]}"
+        if game.best_tier_this_game else "sem detonações nessa partida"
+    )
+    sub = small.render(best_txt, True, TEXT_DIM)
+    screen.blit(sub, sub.get_rect(midtop=(panel_x + panel_w // 2, cursor)))
+    cursor += 22
+
+    if game.last_rank == 0 and game.score > 0:
+        banner = font.render("NOVO RECORDE!", True, HIGHLIGHT)
+        screen.blit(banner, banner.get_rect(midtop=(panel_x + panel_w // 2, cursor)))
+    elif game.last_rank >= 0:
+        banner = small.render(f"você ficou em #{game.last_rank + 1}", True, HIGHLIGHT)
+        screen.blit(banner, banner.get_rect(midtop=(panel_x + panel_w // 2, cursor)))
+    cursor += 28
+
+    # Leaderboard table
+    header = small.render("TOP 10", True, TEXT_DIM)
+    screen.blit(header, header.get_rect(midtop=(panel_x + panel_w // 2, cursor)))
+    cursor += 20
+
+    if not game.leaderboard:
+        empty = small.render("— vazio —", True, TEXT_DIM)
+        screen.blit(empty, empty.get_rect(midtop=(panel_x + panel_w // 2, cursor)))
+    else:
+        col_x = panel_x + 20
+        for idx, entry in enumerate(game.leaderboard[:MAX_SCORES]):
+            tier = entry.get("best_tier", 0)
+            tier_txt = FIB_LABELS.get(tier, "-") if tier else "-"
+            date = entry.get("date", "")[:10]  # YYYY-MM-DD
+            color = HIGHLIGHT if idx == game.last_rank else TEXT_COLOR
+            line = f"{idx + 1:>2}.  {entry.get('score', 0):>6}   {tier_txt:<4}  {date}"
+            screen.blit(small.render(line, True, color), (col_x, cursor))
+            cursor += 18
+
+    # Hint
+    hint = small.render("R para nova partida · ESC para sair", True, TEXT_DIM)
+    screen.blit(hint, hint.get_rect(midbottom=(panel_x + panel_w // 2, panel_y + panel_h - 14)))
 
 
 # ---------- Main ----------
@@ -606,6 +770,8 @@ def main() -> None:
 
         draw_background(screen)
         draw_board(screen, game, board_x, board_y)
+        if game.state == "gameover":
+            draw_game_over(screen, game, board_x, board_y, font, small, big)
         draw_sidebar(screen, game, sidebar_x, sidebar_y, font, small, big)
 
         pygame.display.flip()

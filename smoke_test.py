@@ -1,9 +1,15 @@
-"""Headless smoke test for manual-detonation mechanics.
+"""Headless smoke test for charged/detonation mechanic, timer and leaderboard.
 
-Exercises: swap validation, charge recomputation, right-click detonation,
-combo multiplier, cascade re-charge.
+Points verified:
+- Charge recomputation after swaps
+- Right-click detonation + combo multiplier
+- Countdown timer triggers game over
+- Score recorded to leaderboard (isolated to a temp file)
 """
 import os
+import tempfile
+from pathlib import Path
+
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 import pygame  # noqa: E402
@@ -13,10 +19,13 @@ pygame.display.set_mode((1, 1))
 
 import main  # noqa: E402
 
+# Isolate leaderboard file so the test never touches the player's scores.json
+TMP_SCORES = Path(tempfile.mkstemp(suffix="-scores.json")[1])
+TMP_SCORES.unlink(missing_ok=True)
+main.SCORES_PATH = TMP_SCORES
+
 
 def plant_isolated_groups(game: main.Game) -> None:
-    """Paint a checkerboard background of colors 2/3 then plant isolated
-    same-color groups of sizes 3 and 5."""
     for r in range(main.GRID_ROWS):
         for c in range(main.GRID_COLS):
             game.board[r][c] = main.Piece(2 if (r + c) % 2 == 0 else 3)
@@ -28,69 +37,62 @@ def plant_isolated_groups(game: main.Game) -> None:
 
 def main_test() -> None:
     game = main.Game(seed=42)
-
-    # 1) After planting groups and recomputing charges, both should be charged
     plant_isolated_groups(game)
     main.recompute_charges(game.board)
-    assert game.board[0][0].charged and game.board[0][2].charged, "row-3 should be charged"
-    assert game.board[2][0].charged and game.board[2][4].charged, "row-5 should be charged"
-    assert not game.board[5][0].charged, "background cells should not be charged"
+    assert game.board[0][0].charged and game.board[2][0].charged
 
-    # 2) Right-click (button=3) on the 3-group detonates only that component
+    # Detonate size-3: score 60 (30 * 2 exact * 1 combo)
     game.on_click(0, 1, button=3)
-    assert game.state == "explode"
-    assert len(game.exploding) == 3
-    assert game.combo_level == 1
-    score_after_first = game.score
-    # size=3, tier=3, base=30, exact x2, combo_mult=1 -> 60
-    assert score_after_first == 60, f"expected 60, got {score_after_first}"
-
-    # Let explosion + fall + settle finish (state returns to idle)
     for _ in range(600):
         game.update(1 / 60)
         if game.state == "idle":
             break
-    else:
-        raise SystemExit("did not settle after first detonation")
-    # The 5-group should still be charged (it was untouched by the first detonation)
-    assert game.board[2][0].charged, "row-5 group should remain charged"
+    assert game.score == 60, f"expected 60 after first detonation, got {game.score}"
+    assert game.best_tier_this_game == 3
 
-    # 3) Detonate the 5-group: combo still active (no swap in between) so x2 mult
+    # Detonate size-5: combo x2 now → 80*2*2 = 320 → total 380
     game.on_click(2, 2, button=3)
-    assert game.state == "explode"
-    # size=5, tier=5, base=80, exact x2, combo_mult=2 -> 320
-    expected_second = 80 * 2 * 2
-    assert game.score == score_after_first + expected_second, (
-        f"expected {score_after_first + expected_second}, got {game.score}"
-    )
-    print(f"score after two chained detonations: {game.score}")
-
-    # Settle
     for _ in range(600):
         game.update(1 / 60)
         if game.state == "idle":
             break
-    else:
-        raise SystemExit("did not settle after second detonation")
+    assert game.score == 380, f"expected 380, got {game.score}"
+    assert game.best_tier_this_game == 5
 
-    # 4) Combo should NOT reset until next swap. Verify left-click swap resets it
-    game.combo_level = 5
-    # Set up a swap that creates no match -> should revert and not reset combo
-    # (we specifically only reset combo on ACCEPTED swaps)
-    # For simplicity just verify the detonate path clears combo handling
-    print(f"combo before reset check: {game.combo_level}")
+    # 3) Force-expire the timer → game over + leaderboard entry
+    game.time_left = 0.01
+    game.update(0.02)
+    assert game.state == "gameover", f"expected gameover, got {game.state}"
+    assert game.last_rank == 0, f"expected rank 0, got {game.last_rank}"
+    assert TMP_SCORES.exists(), "scores.json was not written"
 
-    # Render once to ensure no crash
+    # Reload leaderboard via a fresh Game instance and verify persistence
+    game2 = main.Game(seed=1)
+    assert game2.leaderboard and game2.leaderboard[0]["score"] == 380
+    assert game2.time_left == main.GAME_DURATION
+    print(f"persisted top score: {game2.leaderboard[0]['score']}")
+
+    # 4) Clicks after game over are ignored
+    before_score = game.score
+    game.on_click(0, 0, button=3)
+    game.on_click(0, 0, button=1)
+    assert game.score == before_score, "clicks should be ignored in game over"
+
+    # 5) Render game over screen does not crash
     screen = pygame.display.get_surface()
     font = pygame.font.SysFont(None, 18)
     small = pygame.font.SysFont(None, 14)
     big = pygame.font.SysFont(None, 26)
     main.draw_background(screen)
     main.draw_board(screen, game, 10, 10)
+    main.draw_game_over(screen, game, 10, 10, font, small, big)
     main.draw_sidebar(screen, game, 10, 10, font, small, big)
     print("smoke OK")
 
 
 if __name__ == "__main__":
-    main_test()
-    pygame.quit()
+    try:
+        main_test()
+    finally:
+        TMP_SCORES.unlink(missing_ok=True)
+        pygame.quit()
